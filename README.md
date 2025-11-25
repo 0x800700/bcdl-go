@@ -203,4 +203,4 @@ Stay tuned for updates!
 
 ---
 
-**Made with AI by ProBably Works**
+**Good enough is good enough by ProBably Works**
