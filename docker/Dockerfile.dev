@@ -1,0 +1,47 @@
+FROM golang:1.23-bullseye
+
+# Install Node.js 20
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs
+
+# Install Wails dependencies (Linux)
+RUN apt-get update && apt-get install -y \
+    libgtk-3-dev \
+    libwebkit2gtk-4.0-dev \
+    build-essential \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Playwright dependencies
+# We install these upfront to avoid "browser not found" issues later
+RUN apt-get update && apt-get install -y \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Wails CLI
+RUN go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+# Install Playwright-go driver (will be done in go mod download, but we can prep env)
+# Setting env var to skip browser download during build if we want, but for dev we need it.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0
+
+WORKDIR /app
+
+# Expose Wails dev server ports
+EXPOSE 34115 5173
+
+CMD ["wails", "dev", "-appargs", "-browser"]

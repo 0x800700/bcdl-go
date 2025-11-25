@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    volumes:
+      - ../:/app
+      - frontend_node_modules:/app/frontend/node_modules
+      - /app/build
+      - go_pkg_mod:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+    ports:
+      - "34115:34115" # Wails backend
+      - "5173:5173" # Vite frontend
+    environment:
+      - CGO_ENABLED=1
+      - DISPLAY=:0 # For potential X11 forwarding (optional)
+    command: wails dev -appargs "-browser"
+
+  build:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.build
+    volumes:
+      - ../:/app
+      - frontend_node_modules:/app/frontend/node_modules
+      - go_pkg_mod:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+    environment:
+      - CGO_ENABLED=1
+
+volumes:
+  go_pkg_mod:
+  go_build_cache:
+  frontend_node_modules:
