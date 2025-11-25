@@ -203,4 +203,4 @@ Stay tuned for updates!
 
 ---
 
-**Made with ❤️ by ProBably Works**
+**Made with AI by ProBably Works**
