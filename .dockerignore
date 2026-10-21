@@ -1,0 +1,9 @@
+build/
+release/
+downloads/
+frontend/node_modules/
+frontend/dist/
+bcdl-server
+*.app
+*.exe
+.git

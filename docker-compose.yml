@@ -1,0 +1,14 @@
+services:
+  bcdl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bcdl-app
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    volumes:
+      - ./downloads:/downloads
+    environment:
+      - PORT=8080
+      - DOWNLOAD_DIR=/downloads

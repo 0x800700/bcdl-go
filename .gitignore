@@ -2,13 +2,15 @@
 build/bin/
 build/darwin/
 build/windows/
+bcdl-server
+release/
 
-# Dependencies
-node_modules/
-frontend/node_modules/
-frontend/dist/
+# Downloads
+downloads/
 
-# Go
+# Archives & binaries
+*.zip
+*.tar.gz
 *.exe
 *.exe~
 *.dll
@@ -17,6 +19,11 @@ frontend/dist/
 *.test
 *.out
 go.work
+
+# Dependencies
+node_modules/
+frontend/node_modules/
+frontend/dist/
 
 # IDE
 .vscode/
@@ -41,3 +48,23 @@ ms-playwright/
 *.tmp
 .env
 .env.local
+
+# Local development notes & backups
+CHECKPOINT_*.md
+DEBUGGING.md
+GO_PLAN.md
+PROJECT_SUMMARY.md
+RESTORE_GUIDE.md
+SESSION_SUMMARY.md
+STATUS.md
+TAURI_MIGRATION_PLAN.md
+UI_DESIGN.md
+USER_GUIDE.md
+VERSION_HISTORY.md
+__pycache__/
+backups/
+bcdl-app/
+bcdl-deploy/
+log-electron*
+restore_*.sh
+snapshots/

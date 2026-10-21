@@ -2,101 +2,180 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"html"
 	"log"
+	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"bcdl-app/backend/models"
-	"bcdl-app/backend/playwright"
 
-	pw "github.com/playwright-community/playwright-go"
+	"github.com/PuerkitoBio/goquery"
 )
 
 type ScannerService struct {
-	pwService *playwright.Service
 }
 
-func NewScannerService(pwService *playwright.Service) *ScannerService {
-	return &ScannerService{
-		pwService: pwService,
-	}
+func NewScannerService() *ScannerService {
+	return &ScannerService{}
 }
 
 // ScanArtist scans a Bandcamp artist URL for albums
-func (s *ScannerService) ScanArtist(ctx context.Context, url string, onAlbumFound func(models.Album)) ([]models.Album, error) {
-	log.Printf("Scanner: Creating new page...")
-	page, err := s.pwService.NewPage()
+func (s *ScannerService) ScanArtist(ctx context.Context, urlStr string, onAlbumFound func(models.Album)) ([]models.Album, error) {
+	log.Printf("Scanner: Fetching artist page via HTTP: %s", urlStr)
+	
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 	if err != nil {
-		log.Printf("Scanner: Failed to create page: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
-	defer page.Close()
+	
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-	// Navigate to artist page
-	log.Printf("Scanner: Navigating to %s", url)
-	if _, err := page.Goto(url, pw.PageGotoOptions{
-		WaitUntil: pw.WaitUntilStateNetworkidle,
-	}); err != nil {
-		log.Printf("Scanner: Navigation failed: %v", err)
-		return nil, fmt.Errorf("failed to navigate: %v", err)
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch artist page: %v", err)
 	}
-	log.Printf("Scanner: Navigation successful")
+	defer res.Body.Close()
 
-	// Wait for grid
-	log.Printf("Scanner: Waiting for music grid...")
-	grid := page.Locator("ol#music-grid")
-	if err := grid.WaitFor(pw.LocatorWaitForOptions{
-		State:   pw.WaitForSelectorStateVisible,
-		Timeout: pw.Float(10000),
-	}); err != nil {
-		log.Printf("Scanner: Music grid not found: %v", err)
-		return nil, fmt.Errorf("music grid not found: %v", err)
+	if res.StatusCode != 200 {
+		return nil, fmt.Errorf("artist page returned status code: %d", res.StatusCode)
 	}
-	log.Printf("Scanner: Music grid found")
+	
+	resolvedURL := res.Request.URL.String()
 
-	// Extract all album data in one JavaScript call for performance
-	log.Printf("Scanner: Extracting all album data via JavaScript...")
-	result, err := page.Evaluate(`() => {
-		const items = document.querySelectorAll('li.music-grid-item');
-		return Array.from(items).map(item => {
-			const titleEl = item.querySelector('.title');
-			const artistEl = item.querySelector('.artist');
-			const linkEl = item.querySelector('a');
-			const coverEl = item.querySelector('img');
-			const priceEl = item.querySelector('.price');
-			
-			// Handle lazy loading for cover image
-			let coverUrl = '';
-			if (coverEl) {
-				coverUrl = coverEl.getAttribute('data-original') || coverEl.getAttribute('src');
+	doc, err := goquery.NewDocumentFromReader(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse HTML: %v", err)
+	}
+
+	var rawAlbums []models.Album
+
+	defaultArtist := strings.TrimSpace(doc.Find("#band-name-location .title").Text())
+	if defaultArtist == "" {
+		defaultArtist = strings.TrimSpace(doc.Find("meta[property='og:site_name']").AttrOr("content", ""))
+	}
+
+	log.Printf("Scanner: Parsing music grid...")
+	doc.Find("ol#music-grid li.music-grid-item, ul#music-grid li.music-grid-item").Each(func(i int, sel *goquery.Selection) {
+		var title string
+		sel.Find(".title").Contents().Each(func(i int, s *goquery.Selection) {
+			if goquery.NodeName(s) == "#text" {
+				title += s.Text()
 			}
+		})
+		title = strings.TrimSpace(title)
+		
+		artist := strings.TrimSpace(sel.Find(".artist-override").Text())
+		if artist == "" {
+			artist = strings.TrimSpace(sel.Find(".artist").Text())
+			artist = strings.TrimPrefix(artist, "by ")
+			artist = strings.TrimSpace(artist)
+		}
+		if artist == "" {
+			artist = defaultArtist
+		}
 
-			return {
-				title: titleEl ? titleEl.innerText.trim() : '',
-				artist: artistEl ? artistEl.innerText.replace('by ', '').trim() : '',
-				url: linkEl ? linkEl.getAttribute('href') : '',
-				coverUrl: coverUrl,
-				price: priceEl ? priceEl.innerText.trim() : ''
-			};
-		});
-	}`)
-	if err != nil {
-		log.Printf("Scanner: Failed to extract data: %v", err)
-		return nil, fmt.Errorf("failed to extract album data: %v", err)
+		href, exists := sel.Find("a").Attr("href")
+		if !exists {
+			return
+		}
+
+		fullURL := href
+		if !strings.HasPrefix(href, "http") {
+			baseURL := strings.TrimRight(strings.Split(resolvedURL, "/music")[0], "/")
+			if !strings.HasPrefix(href, "/") {
+				fullURL = baseURL + "/" + href
+			} else {
+				fullURL = baseURL + href
+			}
+		}
+
+		coverURL := ""
+		imgSel := sel.Find("img")
+		if lazySrc, ok := imgSel.Attr("data-original"); ok && lazySrc != "" {
+			coverURL = lazySrc
+		} else if src, ok := imgSel.Attr("src"); ok && src != "" {
+			coverURL = src
+		}
+
+		rawAlbums = append(rawAlbums, models.Album{
+			Title:    title,
+			Artist:   artist,
+			CoverURL: coverURL,
+			URL:      fullURL,
+		})
+	})
+
+	// Also parse data-client-items from the music grid (Bandcamp stores remaining items here beyond the first 16)
+	grid := doc.Find("ol#music-grid, ul#music-grid")
+	if clientItems, exists := grid.Attr("data-client-items"); exists && clientItems != "" {
+		unescaped := html.UnescapeString(clientItems)
+		var items []struct {
+			Title    string `json:"title"`
+			PageURL  string `json:"page_url"`
+			ArtID    int64  `json:"art_id"`
+			Type     string `json:"type"`
+			BandID   int64  `json:"band_id"`
+			ID       int64  `json:"id"`
+			Filtered bool   `json:"filtered"`
+		}
+		if err := json.Unmarshal([]byte(unescaped), &items); err == nil {
+			log.Printf("Scanner: Found %d additional items in data-client-items", len(items))
+			baseURL := strings.TrimRight(strings.Split(resolvedURL, "/music")[0], "/")
+			for _, item := range items {
+				if item.Filtered || item.PageURL == "" {
+					continue
+				}
+				fullURL := item.PageURL
+				if !strings.HasPrefix(fullURL, "http") {
+					if !strings.HasPrefix(fullURL, "/") {
+						fullURL = baseURL + "/" + fullURL
+					} else {
+						fullURL = baseURL + fullURL
+					}
+				}
+
+				coverURL := ""
+				if item.ArtID > 0 {
+					coverURL = fmt.Sprintf("https://f4.bcbits.com/img/a%d_9.jpg", item.ArtID)
+				}
+
+				// Avoid duplicates
+				alreadyExists := false
+				for _, existing := range rawAlbums {
+					if existing.URL == fullURL {
+						alreadyExists = true
+						break
+					}
+				}
+
+				if !alreadyExists {
+					rawAlbums = append(rawAlbums, models.Album{
+						Title:    item.Title,
+						Artist:   defaultArtist,
+						CoverURL: coverURL,
+						URL:      fullURL,
+					})
+				}
+			}
+		}
 	}
 
-	// Convert result to []interface{}
-	itemsData, ok := result.([]interface{})
-	if !ok {
-		log.Printf("Scanner: Unexpected result type: %T", result)
-		return nil, fmt.Errorf("unexpected result type")
-	}
-
-	log.Printf("Scanner: Extracted %d albums from grid", len(itemsData))
+	log.Printf("Scanner: Extracted %d total releases. Checking price status concurrently...", len(rawAlbums))
 
 	var albums []models.Album
-	for i, itemData := range itemsData {
-		// Check for cancellation
+	var mu sync.Mutex
+	sem := make(chan struct{}, 10)
+	var wg sync.WaitGroup
+
+	for i, rawAlbum := range rawAlbums {
 		select {
 		case <-ctx.Done():
 			log.Printf("Scanner: Scan cancelled by user")
@@ -104,91 +183,85 @@ func (s *ScannerService) ScanArtist(ctx context.Context, url string, onAlbumFoun
 		default:
 		}
 
-		data, ok := itemData.(map[string]interface{})
-		if !ok {
-			continue
-		}
+		wg.Add(1)
+		sem <- struct{}{}
 
-		title, _ := data["title"].(string)
-		artist, _ := data["artist"].(string)
-		href, _ := data["url"].(string)
-		coverURL, _ := data["coverUrl"].(string)
-		// priceText is used as a fallback or initial guess
-		// priceText, _ := data["price"].(string)
+		go func(index int, album models.Album) {
+			defer wg.Done()
+			defer func() { <-sem }()
 
-		// Handle relative URLs
-		fullURL := href
-		if !strings.HasPrefix(href, "http") {
-			baseURL := strings.Split(url, "/music")[0]
-			fullURL = baseURL + href
-		}
+			status, isFree, isNYP := checkAlbumStatus(ctx, client, album.URL)
+			album.Status = status
+			album.IsFree = isFree
+			album.IsNYP = isNYP
 
-		log.Printf("Scanner: Checking status for album %d/%d: %s", i+1, len(itemsData), title)
+			log.Printf("Scanner: Status for album %d/%d (%s): %s", index+1, len(rawAlbums), album.Title, status)
 
-		// Visit album page to check true status (NYP/Free/Paid)
-		// We reuse the same page for performance
-		status := "paid"
-		isFree := false
-		isNYP := false
-
-		if _, err := page.Goto(fullURL, pw.PageGotoOptions{
-			WaitUntil: pw.WaitUntilStateDomcontentloaded, // Faster than networkidle
-		}); err == nil {
-			// Check for "name your price" or "Free Download"
-			// Using Evaluate for speed
-			checkResult, err := page.Evaluate(`() => {
-				const buyHeader = document.querySelector('h4.ft.compound-button');
-				if (!buyHeader) return 'unavailable';
-				
-				const text = buyHeader.innerText.toLowerCase();
-				if (text.includes('name your price')) return 'nyp';
-				if (text.includes('free download')) return 'free';
-				
-				const buyBtn = buyHeader.querySelector('button.download-link');
-				if (buyBtn) {
-					const btnText = buyBtn.innerText.toLowerCase();
-					if (btnText.includes('name your price')) return 'nyp';
-					if (btnText.includes('free')) return 'free';
-				}
-				
-				return 'paid';
-			}`)
-
-			if err == nil {
-				statusStr, _ := checkResult.(string)
-				if statusStr == "nyp" {
-					isNYP = true
-					status = "nyp"
-				} else if statusStr == "free" {
-					isFree = true
-					status = "free"
-				} else if statusStr == "paid" {
-					status = "paid"
-				}
+			mu.Lock()
+			albums = append(albums, album)
+			if onAlbumFound != nil {
+				onAlbumFound(album)
 			}
-		} else {
-			log.Printf("Scanner: Failed to visit album page: %v", err)
+			mu.Unlock()
+
+		}(i, rawAlbum)
+	}
+
+	wg.Wait()
+	
+	log.Printf("Scanner: Finished processing all items, returning %d albums", len(albums))
+	return albums, nil
+}
+
+func checkAlbumStatus(ctx context.Context, client *http.Client, urlStr string) (string, bool, bool) {
+	status := "paid"
+	isFree := false
+	isNYP := false
+
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return status, isFree, isNYP
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	res, err := client.Do(req)
+	if err != nil {
+		return status, isFree, isNYP
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != 200 {
+		return status, isFree, isNYP
+	}
+
+	doc, err := goquery.NewDocumentFromReader(res.Body)
+	if err != nil {
+		return status, isFree, isNYP
+	}
+
+	buyHeader := doc.Find("h4.ft.compound-button")
+	if buyHeader.Length() == 0 {
+		return "unavailable", isFree, isNYP
+	}
+
+	text := strings.ToLower(buyHeader.Text())
+	if strings.Contains(text, "name your price") {
+		return "nyp", false, true
+	}
+	if strings.Contains(text, "free download") {
+		return "free", true, false
+	}
+
+	buyBtn := buyHeader.Find("button.download-link, a.download-link")
+	if buyBtn.Length() > 0 {
+		btnText := strings.ToLower(buyBtn.Text())
+		if strings.Contains(btnText, "name your price") {
+			return "nyp", false, true
 		}
-
-		album := models.Album{
-			Title:    title,
-			Artist:   artist,
-			CoverURL: coverURL,
-			URL:      fullURL,
-			IsFree:   isFree,
-			IsNYP:    isNYP,
-			Price:    "", // Price text is less relevant now that we have status
-			Status:   status,
-		}
-
-		albums = append(albums, album)
-
-		// Emit event for dynamic UI updates
-		if onAlbumFound != nil {
-			onAlbumFound(album)
+		if strings.Contains(btnText, "free") {
+			return "free", true, false
 		}
 	}
 
-	log.Printf("Scanner: Finished processing all items, returning %d albums", len(albums))
-	return albums, nil
+	return status, isFree, isNYP
 }

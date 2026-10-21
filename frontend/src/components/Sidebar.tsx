@@ -62,18 +62,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
             {/* Download Folder */}
             <div className="mb-6">
                 <label className="block text-slate-400 text-xs uppercase font-bold mb-2 tracking-wider">
-                    Download Folder
+                    Download Destination
                 </label>
                 <div className="flex gap-2">
-                    <div className="flex-1 bg-background border border-slate-700 rounded-lg py-3 px-4 text-sm text-slate-300 truncate">
-                        {folder || "Select folder..."}
+                    <div className="flex-1 bg-background border border-slate-700 rounded-lg py-3 px-4 text-sm text-slate-300 truncate font-mono">
+                        {folder || "/downloads"}
                     </div>
-                    <button
-                        onClick={onSelectFolder}
-                        className="bg-slate-700 hover:bg-slate-600 text-white p-3 rounded-lg transition-colors"
-                    >
-                        <FolderOpen className="w-5 h-5" />
-                    </button>
                 </div>
             </div>
 

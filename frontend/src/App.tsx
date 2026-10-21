@@ -4,12 +4,25 @@ import { AlbumCard } from './components/AlbumCard';
 import { LogPanel } from './components/LogPanel';
 import { StatusPanel } from './components/StatusPanel';
 import { Album, LogMessage } from './types';
-import { EventsOn } from '../wailsjs/runtime/runtime';
-import { ScanArtist, SelectFolder, DownloadAlbum, StopScan } from '../wailsjs/go/main/App';
+
+const api = {
+    scan: (url: string) => fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+    }),
+    stopScan: () => fetch('/api/scan/stop', { method: 'POST' }),
+    download: (url: string, format: string) => fetch('/api/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, format })
+    }),
+    getConfig: () => fetch('/api/config').then(r => r.json()),
+};
 
 function App() {
     const [url, setUrl] = useState("");
-    const [folder, setFolder] = useState("");
+    const [folder, setFolder] = useState("/downloads");
     const [albums, setAlbums] = useState<Album[]>([]);
     const [selectedAlbums, setSelectedAlbums] = useState<Set<string>>(new Set());
     const [logs, setLogs] = useState<LogMessage[]>([]);
@@ -31,111 +44,111 @@ function App() {
     };
 
     useEffect(() => {
-        // Wails Event Listeners
-        try {
-            EventsOn("scan:start", (url: string) => {
-                setIsScanning(true);
-                addLog(`Scanning artist: ${url}`, 'info');
-            });
+        // Fetch server config
+        api.getConfig().then(cfg => {
+            if (cfg.download_dir) setFolder(cfg.download_dir);
+        }).catch(() => setFolder('/downloads'));
 
-            EventsOn("scan:complete", (results: Album[]) => {
-                setIsScanning(false);
+        // Server-Sent Events listener
+        const es = new EventSource('/api/events');
+
+        es.addEventListener('connected', () => {
+            console.log('Connected to SSE event stream');
+        });
+
+        es.addEventListener('scan:start', (e: MessageEvent) => {
+            setIsScanning(true);
+            addLog(`Scanning artist: ${e.data}`, 'info');
+        });
+
+        es.addEventListener('scan:complete', (e: MessageEvent) => {
+            setIsScanning(false);
+            try {
+                const results: Album[] = JSON.parse(e.data);
                 setAlbums(results || []);
                 addLog(`Found ${results?.length || 0} albums`, 'success');
-            });
+            } catch (err) {
+                addLog('Error parsing scan results', 'error');
+            }
+        });
 
-            const cleanupFound = EventsOn("scan:album_found", (album: Album) => {
-                console.log("Received scan:album_found:", album.title);
+        es.addEventListener('scan:album_found', (e: MessageEvent) => {
+            try {
+                const album: Album = JSON.parse(e.data);
                 addLog(`Found album: ${album.title}`, 'info');
                 setAlbums(prev => {
-                    // Avoid duplicates just in case
                     if (prev.some(a => a.url === album.url)) return prev;
                     return [...prev, album];
                 });
-            });
+            } catch (err) {
+                console.error('Error parsing album:', err);
+            }
+        });
 
-            EventsOn("scan:error", (err: string) => {
-                setIsScanning(false);
-                addLog(`Scan error: ${err}`, 'error');
-            });
+        es.addEventListener('scan:error', (e: MessageEvent) => {
+            setIsScanning(false);
+            addLog(`Scan error: ${e.data}`, 'error');
+        });
 
-            EventsOn("scan:stopped", (count: number) => {
-                setIsScanning(false);
-                addLog(`Scan stopped. Found ${count} albums.`, 'warning');
-            });
+        es.addEventListener('scan:stopped', (e: MessageEvent) => {
+            setIsScanning(false);
+            addLog(`Scan stopped. Found ${e.data} albums.`, 'warning');
+        });
 
-            EventsOn("download:start", (url: string) => {
-                addLog(`Starting download: ${url}`, 'info');
-            });
+        es.addEventListener('download:start', (e: MessageEvent) => {
+            addLog(`Starting download: ${e.data}`, 'info');
+        });
 
-            EventsOn("download:progress", (data: any) => {
-                // Optional: Update specific album progress if needed
-                // For now just log it
-                // addLog(data.message, 'info'); 
-            });
+        es.addEventListener('download:progress', (e: MessageEvent) => {
+            try {
+                const data = JSON.parse(e.data);
+                addLog(data.message, 'info');
+            } catch (err) {
+                addLog(e.data, 'info');
+            }
+        });
 
-            EventsOn("download:complete", (url: string) => {
-                setDownloadedCount(prev => prev + 1);
-                addLog(`Download complete: ${url}`, 'success');
-            });
+        es.addEventListener('download:complete', (e: MessageEvent) => {
+            setDownloadedCount(prev => prev + 1);
+            addLog(`Download complete: ${e.data}`, 'success');
+        });
 
-            EventsOn("download:error", (data: any) => {
-                setFailedCount(prev => prev + 1);
+        es.addEventListener('download:error', (e: MessageEvent) => {
+            setFailedCount(prev => prev + 1);
+            try {
+                const data = JSON.parse(e.data);
                 addLog(`Download failed: ${data.error}`, 'error');
-            });
-
-            EventsOn("log:error", (msg: string) => addLog(msg, 'error'));
-        } catch (e) {
-            console.warn("Wails runtime not available. Events disabled.");
-            addLog("Running in browser mode (No Wails backend)", 'warning');
-        }
+            } catch (err) {
+                addLog(`Download failed: ${e.data}`, 'error');
+            }
+        });
 
         return () => {
-            // Wails runtime handles cleanup, but good practice if we could
-            // For Wails, these are generally not needed as events persist
-            // cleanupStart();
-            // cleanupFound();
-            // cleanupComplete();
-            // cleanupError();
+            es.close();
         };
     }, []);
 
     const handleScan = async () => {
         if (!url) return;
-        console.log('Starting scan for:', url);
         setAlbums([]);
         setSelectedAlbums(new Set());
         setShowStatus(false);
         setIsScanning(true);
-        // Don't addLog here - the scan:start event will do it
 
         try {
-            // We ignore the return value here as we rely on events for dynamic updates
-            await ScanArtist(url);
+            await api.scan(url);
         } catch (err) {
             console.error('Scan error:', err);
             setIsScanning(false);
-            // Don't addLog here - the scan:error event will do it
+            addLog(`Failed to start scan: ${err}`, 'error');
         }
     };
 
     const handleStopScan = async () => {
         try {
-            await StopScan();
+            await api.stopScan();
         } catch (err) {
             console.error('Stop scan error:', err);
-        }
-    };
-
-    const handleSelectFolder = async () => {
-        try {
-            const path = await SelectFolder();
-            if (path) {
-                setFolder(path);
-                addLog(`Selected folder: ${path}`, 'info');
-            }
-        } catch (err) {
-            addLog(`Error selecting folder: ${err}`, 'error');
         }
     };
 
@@ -150,10 +163,6 @@ function App() {
     };
 
     const handleDownload = async () => {
-        if (!folder) {
-            addLog("Please select a download folder first", 'warning');
-            return;
-        }
         if (selectedAlbums.size === 0) {
             addLog("No albums selected", 'warning');
             return;
@@ -169,15 +178,15 @@ function App() {
 
         for (const album of albumsToDownload) {
             try {
-                await DownloadAlbum(album.url, folder, "flac"); // Default to FLAC for now
+                await api.download(album.url, "flac");
             } catch (err) {
-                // Error handled by event
+                // Handled by SSE events
             }
         }
 
         setIsDownloading(false);
         setShowStatus(true);
-        addLog("All downloads finished", 'success');
+        addLog("All downloads queued", 'success');
     };
 
     return (
@@ -186,7 +195,7 @@ function App() {
                 url={url}
                 setUrl={setUrl}
                 folder={folder}
-                onSelectFolder={handleSelectFolder}
+                onSelectFolder={() => {}}
                 onScan={handleScan}
                 onStop={handleStopScan}
                 isScanning={isScanning}
